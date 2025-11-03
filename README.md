@@ -1,6 +1,7 @@
 # Nexora — 4-Year Portfolio Selection & Schedule  
 
-[![View Live Report](https://saamexait.github.io/nexora-portfolio/)
+[![View Live Report](https://img.shields.io/badge/Live%20Report-Open-0A66C2?logo=githubpages&logoColor=white)](https://saamexait.github.io/nexora-portfolio/)
+
 
 ---
 
