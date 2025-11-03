@@ -1,0 +1,32 @@
+project:
+  type: website
+  output-dir: docs
+  resources:
+    - assets
+
+website:
+  title: "Nexora Portfolio — 4-Year Strategic Schedule"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+
+format:
+  html:
+    theme:
+      light: flatly
+      dark: darkly
+    toc: true
+    toc-title: "On this page"
+    toc-depth: 3
+    number-sections: false
+    code-fold: true
+    df-print: paged
+    page-layout: full
+    fig-cap-location: margin
+    fig-align: center
+    fig-width: 9
+    fig-height: 6
+    dpi: 220
+    anchor-sections: true
+    css: assets/bloomberg.css

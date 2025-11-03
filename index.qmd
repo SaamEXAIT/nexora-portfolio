@@ -1,0 +1,721 @@
+---
+title: "Nexora: 4-Year Portfolio Selection & Schedule"
+author: "Oleksandr Skytchenko"
+date: today
+format:
+  html:
+    theme:
+      light: flatly
+      dark: darkly
+    toc: true
+    toc-title: "On this page"
+    toc-depth: 3
+    number-sections: false
+    code-fold: true
+    code-tools: false
+    smooth-scroll: true
+    df-print: paged
+    page-layout: full
+    fig-cap-location: margin
+    fig-align: center
+    fig-width: 9
+    fig-height: 6
+    dpi: 220
+    anchor-sections: true
+    css: assets/bloomberg.css
+execute:
+  echo: false
+  warning: false
+  message: false
+  cache: false
+---
+
+
+
+```{r}
+# === SETUP ===
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(ggrepel)
+library(kableExtra)
+
+
+# Load data ---------------------------------------------------------------
+csv_path <- "projects.csv"
+stopifnot(file.exists(csv_path))
+
+projects <- read_csv(csv_path, show_col_types = FALSE)
+names(projects) <- tolower(names(projects))
+
+# Verify required columns
+req <- c("id","name","npv_k","strategic_value",
+         "sustainability_tco2","workforce_fte","motivation","duration_years")
+stopifnot(all(req %in% names(projects)))
+
+# Rename duration_years -> duration_months (task values are in months)
+projects <- projects %>%
+  rename(duration_months = duration_years) %>%
+  mutate(across(c(npv_k, strategic_value, sustainability_tco2,
+                  workforce_fte, motivation, duration_months), as.numeric))
+
+# === FUNCTIONS ===
+
+# --- Scoring -------------------------------------------------------------
+score_projects <- function(df, mode = c("balanced","growth","responsible")) {
+  mode <- match.arg(mode)
+  rng <- function(x) (x - min(x)) / (max(x) - min(x) + 1e-9)
+  x <- df %>%
+    mutate(
+      npv_n = rng(npv_k),
+      sv_n  = rng(strategic_value),
+      sus_n = rng(sustainability_tco2),
+      mot_n = rng(motivation),
+      fte_n = rng(workforce_fte)
+    )
+  x$score <- switch(
+    mode,
+    balanced    = 0.33 * x$npv_n + 0.33 * x$sv_n + 0.34 * x$sus_n + 0.05 * x$mot_n - 0.05 * x$fte_n,
+    growth      = 0.65 * x$npv_n + 0.20 * x$sus_n + 0.15 * x$sv_n + 0.02 * x$mot_n - 0.02 * x$fte_n,
+    responsible = 0.55 * x$sus_n + 0.25 * x$mot_n + 0.20 * x$sv_n - 0.05 * x$fte_n + 0.05 * x$npv_n
+  )
+  x %>% arrange(desc(score))
+}
+
+# --- Selection (greedy) --------------------------------------------------
+build_portfolio <- function(df_scored, min_npv, min_sv, cap_total_fte = NA) {
+  cand <- df_scored %>% arrange(desc(score)) %>% mutate(selected = FALSE)
+  tot <- c(npv=0, sv=0, sus=0, fte=0)
+
+  for (i in seq_len(nrow(cand))) {
+    fits <- is.na(cap_total_fte) || (tot["fte"] + cand$workforce_fte[i] <= cap_total_fte)
+    if (fits) {
+      cand$selected[i] <- TRUE
+      tot["npv"] <- tot["npv"] + cand$npv_k[i]
+      tot["sv"]  <- tot["sv"]  + cand$strategic_value[i]
+      tot["sus"] <- tot["sus"] + cand$sustainability_tco2[i]
+      tot["fte"] <- tot["fte"] + cand$workforce_fte[i]
+    }
+  }
+
+  list(
+    selection = cand %>% filter(selected),
+    totals = list(
+      npv = sum(cand$npv_k[cand$selected]),
+      sv  = sum(cand$strategic_value[cand$selected]),
+      sus = sum(cand$sustainability_tco2[cand$selected]),
+      fte = sum(cand$workforce_fte[cand$selected])
+    )
+  )
+}
+
+# --- Balanced 48-Month Scheduler: smooths Strategic Intensity & FTE ---
+schedule_48m <- function(sel_df, cap_monthly_fte = NA, w_sv = 0.7, w_fte = 0.3) {
+  if (nrow(sel_df) == 0) return(sel_df %>% mutate(start_month = integer(), end_month = integer()))
+  # work copies
+  plan <- sel_df %>%
+    arrange(desc(score)) %>%            # higher score first
+    mutate(start_month = NA_integer_, end_month = NA_integer_)
+  used_fte <- rep(0, 48)
+  used_sv  <- rep(0, 48)
+
+  for (i in seq_len(nrow(plan))) {
+    dur <- max(1, round(plan$duration_months[i]))
+    fte <- plan$workforce_fte[i]
+    sv  <- plan$strategic_value[i]
+
+    # Try all feasible start months; pick the one that best smooths (min variance)
+    best_cost <- Inf
+    best_start <- NA_integer_
+
+    for (start in 1:(48 - dur + 1)) {
+      idx <- start:(start + dur - 1)
+
+      # capacity feasibility
+      feasible <- all(is.na(cap_monthly_fte) | (used_fte[idx] + fte) <= cap_monthly_fte)
+      if (!feasible) next
+
+      # simulate placement
+      new_fte <- used_fte; new_fte[idx] <- new_fte[idx] + fte
+      new_sv  <- used_sv;  new_sv[idx]  <- new_sv[idx]  + sv
+
+      # objective: weighted sum of monthly variability
+      cost <- w_sv * stats::sd(new_sv) + w_fte * stats::sd(new_fte)
+
+      if (cost < best_cost) { best_cost <- cost; best_start <- start }
+    }
+
+    # if nothing feasible (rare), push to the end within 48m
+    if (is.na(best_start)) best_start <- max(1, 49 - dur)
+
+    # commit placement
+    idx <- best_start:(best_start + dur - 1)
+    used_fte[idx] <- used_fte[idx] + fte
+    used_sv[idx]  <- used_sv[idx]  + sv
+    plan$start_month[i] <- best_start
+    plan$end_month[i]   <- best_start + dur - 1
+  }
+
+  plan
+}
+
+
+# === RUN MODEL ===
+mode      <- "balanced"        # choose: balanced | growth | responsible
+min_npv   <- 50000             # minimum NPV threshold (k€)
+min_sv    <- 80                # minimum Strategic Value
+cap_total <- 200               # total FTE capacity
+cap_month <- NA                # monthly cap (optional)
+
+scored    <- score_projects(projects, mode)
+picked    <- build_portfolio(scored, min_npv, min_sv, cap_total)
+selected  <- picked$selection
+totals    <- picked$totals
+
+
+meets  <- (totals$npv >= min_npv) & (totals$sv >= min_sv)
+status <- if (meets) "Meets thresholds" else "⚠️ Below thresholds"
+
+if (FALSE) {
+cat("**Strategy:**", mode, "\n",
+    "**Min NPV (k€):**", min_npv, "\n",
+    "**Min Strategic Value:**", min_sv, "\n",
+    "**Total FTE cap:**", ifelse(is.na(cap_total), "∞", cap_total), "\n",
+    "**Monthly FTE cap:**", ifelse(is.na(cap_month), "—", cap_month), "\n",
+    "**Status:**", status, "\n\n")
+
+kable(
+  tibble::tibble(
+    Metric = c("NPV (k€)","Strategic Value (sum)",
+               "Sustainability (tCO2e/yr)","FTE (sum)"),
+    Value  = c(totals$npv, totals$sv, totals$sus, totals$fte)
+  ),
+  caption = "Portfolio totals"
+)
+}
+# --- PLAN A: lift Strategic Value to >= min_sv ---
+if (totals$sv < min_sv) {
+  fix_drop <- intersect(c(20), selected$id)
+  fix_add  <- setdiff(intersect(c(2, 4), scored$id), selected$id)
+
+  selected <- selected %>%
+    dplyr::filter(!id %in% fix_drop) %>%
+    dplyr::bind_rows(scored %>% dplyr::filter(id %in% fix_add)) %>%
+    dplyr::distinct(id, .keep_all = TRUE) %>%
+    dplyr::arrange(dplyr::desc(score))
+
+  totals <- list(
+    npv = sum(selected$npv_k, na.rm = TRUE),
+    sv  = sum(selected$strategic_value, na.rm = TRUE),
+    sus = sum(selected$sustainability_tco2, na.rm = TRUE),
+    fte = sum(selected$workforce_fte, na.rm = TRUE)
+  )
+
+  # old text output disabled (kept for debugging if needed)
+  if (FALSE) {
+    cat("\n--- After Scenario A (applied) ---\n",
+        "Selected projects: ", nrow(selected), "\n",
+        "Total NPV (k€):   ", totals$npv, " | target ≥ ", min_npv, "\n",
+        "Strategic Value Σ:", totals$sv,  " | target ≥ ", min_sv,  "\n",
+        "Sustainability Σ: ", totals$sus, " (tCO2e/yr)\n",
+        "Total FTE Σ:      ", totals$fte, " | cap = ", cap_total, "\n\n", sep = "")
+  }
+}  # <-- this was missing
+
+
+# Build the table sources AFTER Scenario A (so they stay in sync)
+sel_tbl <- selected %>%
+  dplyr::select(
+    id, name, npv_k, strategic_value, sustainability_tco2,
+    workforce_fte, motivation, duration_months, score
+  )
+
+tot_row <- tibble::tibble(
+  id = NA_integer_,
+  name = "TOTAL",
+  npv_k = sum(selected$npv_k, na.rm = TRUE),
+  strategic_value = sum(selected$strategic_value, na.rm = TRUE),
+  sustainability_tco2 = sum(selected$sustainability_tco2, na.rm = TRUE),
+  workforce_fte = sum(selected$workforce_fte, na.rm = TRUE),
+  motivation = NA_real_,
+  duration_months = NA_real_,
+  score = NA_real_
+)
+
+# Create the 48-month schedule BEFORE any tables/plots that use it
+scheduled <- schedule_48m(selected, cap_month)
+# Create (or re-create) the 48-month schedule BEFORE any tables/plots
+if (!exists("scheduled")) scheduled <- schedule_48m(selected, cap_month)
+
+
+# === Scenario summary table (nice formatting; kableExtra-safe) ===
+pass_npv <- totals$npv >= min_npv
+pass_sv  <- totals$sv  >= min_sv
+pass_fte <- is.na(cap_total) || totals$fte <= cap_total
+
+scenario_tbl <- tibble::tibble(
+  Metric = c(
+    "Selected projects",
+    "Total NPV (k€)",
+    "Strategic Value Σ",
+    "Sustainability Σ (tCO₂e/yr)",
+    "Total FTE Σ"
+  ),
+  Value = c(
+    nrow(selected),
+    scales::comma(totals$npv),
+    scales::comma(totals$sv),
+    scales::comma(totals$sus),
+    scales::comma(totals$fte)
+  ),
+  Target = c(
+    "—",
+    paste0("≥ ", scales::comma(min_npv)),
+    paste0("≥ ", min_sv),
+    "—",
+    if (!is.na(cap_total)) paste0("≤ ", scales::comma(cap_total)) else "—"
+  ),
+  Status = c(
+    "—",
+    if (pass_npv) "Meets" else "⚠️ Below",
+    if (pass_sv)  "Meets" else "⚠️ Below",
+    "—",
+    if (pass_fte) "Within" else "⚠️ Exceeds"
+  )
+)
+
+if (requireNamespace("kableExtra", quietly = TRUE)) {
+  badge_css <- "padding:2px 8px;border-radius:12px;display:inline-block;"
+
+  scenario_tbl_print <- scenario_tbl %>%
+    dplyr::mutate(
+      Status = dplyr::case_when(
+        Metric %in% c("Total NPV (k€)", "Strategic Value Σ", "Total FTE Σ") & grepl("✅", Status) ~
+          kableExtra::cell_spec(Status, "html", color = "white", bold = TRUE,
+                                background = "#16a34a", extra_css = badge_css),
+        Metric %in% c("Total NPV (k€)", "Strategic Value Σ", "Total FTE Σ") & grepl("⚠️", Status) ~
+          kableExtra::cell_spec(Status, "html", color = "white", bold = TRUE,
+                                background = "#dc2626", extra_css = badge_css),
+        TRUE ~ Status
+      )
+    )
+
+  scenario_tbl_print %>%
+    kableExtra::kable(
+      format  = "html",
+      caption = "Scenario Summary — After Scenario A (applied)",
+      align   = c("l","r","c","c"),
+      escape  = FALSE
+    ) %>%
+    kableExtra::kable_styling(
+      full_width = FALSE,
+      bootstrap_options = c("striped","condensed")
+    ) %>%
+    kableExtra::column_spec(1, bold = TRUE) %>%
+    kableExtra::column_spec(2, width = "8em", monospace = TRUE) %>%
+    kableExtra::column_spec(3, width = "8em", monospace = TRUE) %>%
+    kableExtra::column_spec(4, width = "7em") %>%
+    kableExtra::row_spec(1, background = "#F8FAFC")
+} else {
+  knitr::kable(
+    scenario_tbl,
+    caption = "Scenario Summary — After Scenario A (applied)",
+    align   = c("l","r","c","c")
+  )
+}
+
+
+
+
+# === TABLES (selected with TOTAL row + balanced 48-month schedule) ===
+library(scales)
+library(kableExtra)
+
+# 1 Format the data (keep this part unchanged)
+sel_tbl_fmt <- dplyr::bind_rows(sel_tbl, tot_row) %>%
+  dplyr::mutate(
+    npv_k               = scales::label_comma(accuracy = 1)(as.numeric(npv_k)),
+    strategic_value     = as.character(strategic_value),
+    sustainability_tco2 = scales::label_comma(accuracy = 1)(as.numeric(sustainability_tco2)),
+    workforce_fte       = scales::label_comma(accuracy = 1)(as.numeric(workforce_fte)),
+    motivation          = dplyr::if_else(is.na(motivation), "", as.character(round(motivation, 2))),
+    duration_months     = dplyr::if_else(is.na(duration_months), "", as.character(round(duration_months, 0))),
+    score               = dplyr::if_else(is.na(score), "", as.character(round(score, 3)))
+  )
+
+if (exists("scheduled") && is.data.frame(scheduled) && nrow(scheduled) > 0) {
+  scheduled_fmt <- scheduled %>%
+    dplyr::arrange(start_month, dplyr::desc(score)) %>%
+    dplyr::select(id, name, strategic_value, workforce_fte,
+                  duration_months, start_month, end_month) %>%
+    dplyr::mutate(
+      workforce_fte   = scales::label_comma(accuracy = 1)(as.numeric(workforce_fte)),
+      duration_months = round(as.numeric(duration_months), 0),
+      start_month     = round(as.numeric(start_month), 0),
+      end_month       = round(as.numeric(end_month), 0)
+    )
+} else {
+  scheduled_fmt <- tibble::tibble(
+    id=integer(), name=character(), strategic_value=numeric(),
+    workforce_fte=numeric(), duration_months=integer(),
+    start_month=integer(), end_month=integer()
+  )
+}
+
+
+# 2 Then render the formatted tables (new styling section)
+# --- Selected portfolio (with TOTAL row) ---
+if (requireNamespace("kableExtra", quietly = TRUE)) {
+  sel_tbl_fmt %>%
+    kableExtra::kable(
+      format  = "html",
+      caption = "Selected portfolio (within FTE cap)",
+      align   = c("c","l","r","r","r","r","r","r","r"),
+      escape  = FALSE
+    ) %>%
+    kableExtra::kable_styling(
+      full_width = FALSE,
+      bootstrap_options = c("striped","hover","condensed")
+    ) %>%
+    kableExtra::row_spec(nrow(sel_tbl_fmt), bold = TRUE)
+} else {
+  knitr::kable(
+    sel_tbl_fmt,
+    caption = "Selected portfolio (within FTE cap)",
+    align   = c("c","l","r","r","r","r","r","r","r")
+  )
+}
+
+# --- Balanced 48-month schedule ---
+if (requireNamespace("kableExtra", quietly = TRUE)) {
+  scheduled_fmt %>%
+    kableExtra::kable(
+      format  = "html",
+      caption = "Balanced 48-month schedule",
+      align   = c("c","l","r","r","r","r","r"),
+      escape  = FALSE
+    ) %>%
+    kableExtra::kable_styling(
+      full_width = FALSE,
+      bootstrap_options = c("striped","hover","condensed")
+    )
+} else {
+  knitr::kable(
+    scheduled_fmt,
+    caption = "Balanced 48-month schedule (sequence across four years)",
+    align   = c("c","l","r","r","r","r","r")
+  )
+}
+
+
+# === PLOT ===
+# --- Bloomberg-style cumulative NPV plot (final, ready to run) ---
+
+# deps
+library(ggplot2)
+library(dplyr)
+library(scales)
+library(grid)
+
+# safety: build cumulative tables if not already present
+if (!exists("min_npv"))        min_npv <- 50000
+if (!exists("scored_cum"))     scored_cum   <- scored   %>% arrange(desc(score))   %>% mutate(cum_npv = cumsum(npv_k))
+if (!exists("selected_cum"))   selected_cum <- selected %>% arrange(desc(score))   %>% mutate(cum_npv = cumsum(npv_k))
+
+# palette
+col_all      <- "#C7CFD9"   # soft gray
+col_selected <- "#0A66C2"   # deep blue
+
+# label data (fixed offsets; anchored to each bubble)
+# Force specific labels to the LEFT and fine-tune spacing
+# --- Bloomberg refinement: keep only first 2 words in label text ---
+
+# --- Label placement rules exactly as requested ---
+
+top_k <- min(8, nrow(selected))
+
+# helper: first two words
+first_two_words <- function(s) {
+  w <- strsplit(s, "\\s+")[[1]]
+  paste(head(w, 2), collapse = " ")
+}
+short2 <- Vectorize(first_two_words)
+
+selected_lab_fixed <- selected_cum %>%
+  arrange(desc(score)) %>%
+  slice_head(n = top_k) %>%
+  mutate(
+    # label text: two words; SPECIAL: id 6 becomes "Security"
+    base_two = short2(name),
+    lbl = dplyr::case_when(
+      id == 6  ~ paste0(id, " • Security"),
+      TRUE     ~ paste0(id, " • ", base_two)
+    ),
+
+    # default side by threshold
+    side_default = ifelse(cum_npv < min_npv, "left", "right"),
+
+    # OVERRIDES you requested
+    side = dplyr::case_when(
+      id %in% c(1, 17) ~ "right",   # 1 & 17 → right of bubble
+      id == 9          ~ "right",   # 9 → right (and below via y offset)
+      TRUE             ~ side_default
+    ),
+
+    # horizontal offsets (k€). 5 is centered (dx=0)
+    dx = dplyr::case_when(
+      id == 5          ~ 0,           # on top of its bubble
+      side == "left"   ~ -2800,
+      TRUE             ~  2400
+    ),
+
+    # vertical offsets:
+    y_lab = dplyr::case_when(
+      id == 5  ~ sustainability_tco2 + 7,   # 5 → above
+      id == 9  ~ sustainability_tco2 - 8,   # 9 → slightly below
+      TRUE     ~ sustainability_tco2
+    ),
+
+    x_lab = cum_npv + dx,
+
+    # text alignment: centered for 5; else left/right by side
+    hjust = dplyr::case_when(
+      id == 5        ~ 0.5,
+      side == "left" ~ 1,
+      TRUE           ~ 0
+    )
+  )
+
+
+# plot
+p <- ggplot() +
+  # background: all candidates
+  geom_point(
+    data = scored_cum,
+    aes(x = cum_npv, y = sustainability_tco2, size = strategic_value),
+    color = col_all, alpha = 0.45, stroke = 0
+  ) +
+  # selected bubbles
+  geom_point(
+    data = selected_cum,
+    aes(x = cum_npv, y = sustainability_tco2, size = strategic_value),
+    shape = 21, fill = col_selected, color = "white", stroke = 0.9, alpha = 0.98
+  ) +
+  # leader lines bubble -> label
+geom_segment(
+  data = selected_lab_fixed,
+  aes(x = cum_npv, y = sustainability_tco2, xend = x_lab, yend = y_lab),
+  linewidth = 0.45,                               # thicker line
+  color = scales::alpha("#7A869A", 0.8),          # soft Bloomberg gray
+  lineend = "round"
+) +
+geom_text(
+  data = selected_lab_fixed,
+  aes(x = x_lab, y = y_lab, label = lbl, hjust = hjust),
+  family = "sans", size = 3.3,
+  color = scales::alpha("#111111", 0.85)
+  ) +
+  # dashed minimum cumulative NPV line (only if in range)
+  {
+    if (min_npv <= max(scored_cum$cum_npv, na.rm = TRUE)) {
+      geom_vline(xintercept = min_npv, linetype = "dashed", linewidth = 0.4, color = "#7A869A")
+    } else NULL
+  } +
+  # axes, legend, layout
+  scale_x_continuous(
+    name   = "Cumulative NPV (k€)",
+    labels = label_comma(accuracy = 1),
+    expand = expansion(mult = c(0.18, 0.10))
+  ) +
+  scale_y_continuous(
+    name   = "Sustainability Impact (tCO_2e/yr)",
+    labels = label_comma(accuracy = 1)
+  ) +
+  scale_size_continuous(
+    name   = "Strategic Value (1–9)",
+    breaks = c(3, 5, 7, 9),
+    range  = c(3, 14),
+    guide  = guide_legend(
+      override.aes = list(color = col_selected, fill = col_selected, alpha = 0.95),
+      title.position = "top"
+    )
+  ) +
+  coord_cartesian(clip = "off", expand = TRUE) +
+  labs(
+    title    = "Selected as per strategic goals vs All Projects",
+    subtitle = "Blue = selected • Gray = all",
+    caption  = paste(
+      "X-axis shows cumulative NPV by score rank",
+      "Y-axis shows Sustainability (tCO_2e/yr)",
+      "Dashed line = minimum required cumulative NPV",
+      sep = "\n"
+    )
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title.position = "plot",
+    legend.position     = "right",
+    legend.title        = element_text(face = "bold"),
+    legend.key.height   = unit(12, "pt"),
+    legend.key.width    = unit(18, "pt"),
+    panel.grid.minor    = element_blank(),
+    panel.grid.major.x  = element_line(linewidth = 0.2, color = "#E6E8EB"),
+    panel.grid.major.y  = element_line(linewidth = 0.2, color = "#E6E8EB"),
+    axis.title.x        = element_text(margin = margin(t = 6)),
+    axis.title.y        = element_text(margin = margin(r = 6)),
+    plot.subtitle       = element_text(color = "#4A4A4A"),
+    plot.caption        = element_text(color = "#6B7280", size = 10)
+  )
+
+p
+ggsave("nexora_selected_portfolio_.png", p, width = 8.5, height = 6, dpi = 320)
+ggsave("portfolio_bloomberg_transparent.png", p, width = 8.5, height = 6, dpi = 320, bg = "transparent")
+
+```
+
+Why This Portfolio Is Optimal (Balanced Mode)
+
+Evidence-Based Efficiency: Weighted optimization (NPV 33%, Strategic 33%, Sustainability 34%) ensures each euro and FTE contributes demonstrably to Nexora’s purpose — a reflection of “what gets measured, gets managed.”
+
+Strategic Coherence: Projects like International Market, Security, and Migrate Existing Systems form the strategic backbone of transformation — high value, high decarbonization, and organizational learning effects.
+
+Inclusive Impact: In our spirit, the design balances aggregate returns with distributive outcomes — creating jobs, reducing carbon intensity, and fostering digital inclusion across market layers.
+
+Resource Stewardship: Operating at 189/200 FTE, the portfolio sustains ambition within administrative and fiscal realism.
+
+Adaptive Performance Culture: By linking data analytics to decision-making, Nexora advances toward a governance model that is transparent, iterative, and learning-oriented.
+
+```{r}
+# === SECOND FIGURE: Project execution sequence (Gantt-style) ===
+library(ggplot2)
+suppressWarnings(suppressMessages(requireNamespace("RColorBrewer", quietly = TRUE)))
+
+if (exists("scheduled") && nrow(scheduled) > 0) {
+  scheduled_gantt <- scheduled %>%
+    dplyr::arrange(start_month, dplyr::desc(score)) %>%
+    dplyr::mutate(
+      name_short  = ifelse(nchar(name) > 28, paste0(substr(name, 1, 26), "…"), name),
+      start_month = as.numeric(start_month),
+      end_month   = as.numeric(end_month),
+      sv_band     = as.factor(pmax(1, round(as.numeric(strategic_value))))
+    )
+
+  bands <- data.frame(
+    xstart = c(1, 13, 25, 37),
+    xend   = c(12, 24, 36, 48)
+  )
+
+  p_gantt <- ggplot() +
+    geom_rect(
+      data = bands,
+      aes(xmin = xstart, xmax = xend, ymin = -Inf, ymax = Inf, fill = factor(xstart)),
+      alpha = 0.06, inherit.aes = FALSE
+    ) +
+    scale_fill_manual(values = c("#A7B1BF", "#FFFFFF", "#A7B1BF", "#FFFFFF"), guide = "none") +
+    geom_segment(
+      data = scheduled_gantt,
+      aes(x = start_month, xend = end_month,
+          y = reorder(name_short, start_month),
+          yend = reorder(name_short, start_month),
+          color = sv_band),
+      linewidth = 4, lineend = "round"
+    ) +
+    geom_point(
+      data = scheduled_gantt,
+      aes(x = start_month, y = reorder(name_short, start_month), color = sv_band),
+      size = 2.4
+    ) +
+    geom_point(
+      data = scheduled_gantt,
+      aes(x = end_month, y = reorder(name_short, start_month), color = sv_band),
+      size = 2.4
+    ) +
+    geom_text(
+      data = scheduled_gantt,
+      aes(x = pmax(0.8, start_month - 0.8), y = reorder(name_short, start_month), label = id),
+      size = 3.2, hjust = 1, color = "#2B2B2B"
+    ) +
+    geom_vline(xintercept = c(12.5, 24.5, 36.5), color = "#9AA4B2", linewidth = 0.35, linetype = "dashed") +
+    annotate("text", x = c(6.5, 18.5, 30.5, 42.5), y = Inf, vjust = 1.6,
+             label = c("Year 1", "Year 2", "Year 3", "Year 4"),
+             size = 3.4, color = "#4A4A4A") +
+    scale_x_continuous(
+      breaks = seq(0, 48, by = 6),
+      limits = c(0.5, 48.5),
+      expand = expansion(mult = c(0.02, 0.02))
+    ) +
+    {
+      if ("RColorBrewer" %in% .packages(all.available = TRUE))
+        scale_color_brewer(palette = "Blues", direction = 1, name = "Strategic Value")
+      else
+        scale_color_discrete(name = "Strategic Value")
+    } +
+    labs(
+      title = "Sequence of Project Execution (Balanced 48-month Schedule)",
+      subtitle = "Bars show project durations; colors indicate Strategic Value",
+      x = "Month",
+      y = "Project"
+    ) +
+    theme_minimal(base_size = 13) +
+    theme(
+      legend.position    = "bottom",
+      legend.title       = element_text(face = "bold"),
+      panel.grid.minor   = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.major.x = element_line(linewidth = 0.25, color = "#E5E7EB"),
+      axis.text.y        = element_text(size = 9),
+      plot.title.position = "plot",
+      plot.margin        = margin(8, 24, 8, 8)
+    ) +
+    coord_cartesian(clip = "off")
+
+  print(p_gantt)
+  ggsave("portfolio_schedule_gantt.png", p_gantt, width = 9.5, height = 5.2, dpi = 320)
+}
+
+
+```
+
+```{r}
+# === Mutual Exclusivity Diagnostic (Refined Styling) ===
+if (!requireNamespace("corrplot", quietly = TRUE)) {
+  install.packages("corrplot")
+}
+
+# suppress startup messages globally
+suppressPackageStartupMessages({
+  library(corrplot)
+})
+
+library(corrplot)
+
+corr_mat <- selected %>%
+  dplyr::select(npv_k, strategic_value, sustainability_tco2, workforce_fte, motivation) %>%
+  cor(use = "complete.obs")
+
+# refined plot aesthetics
+corrplot::corrplot(
+  corr_mat,
+  method = "color",
+  type = "upper",               # show only upper triangle (cleaner)
+  order = "hclust",             # cluster similar variables
+  addCoef.col = "black",        # show numeric values
+  number.cex = 0.7,             # coefficient text size
+  tl.col = "black",             # variable label color
+  tl.srt = 30,                  # tilt variable names
+  tl.cex = 0.9,                 # smaller text
+  col = colorRampPalette(c("#B91C1C", "#F3F4F6", "#15803D"))(200),  # red-white-green palette
+  mar = c(0, 0, 3, 0),          # add top margin
+  title = "Correlation Matrix — Selected Portfolio Attributes"
+)
+
+
+```
+
+This portfolio transforms Nexora’s strategy into a verifiable system of performance. Quantitative evidence confirms that the organization’s priorities — value creation, sustainable growth, and human motivation — coexist in equilibrium rather than in tension.
+
+The moderate correlations indicate that projects are non-redundant yet synergistic; the over-achievement on NPV and Strategic Value shows collective coverage of the strategic space. Together, these findings validate that Nexora’s investments are neither fragmented nor overstretched, but structurally aligned with its long-term mission of sustainable innovation and responsible profitability.
+
+In sum, the portfolio stands as a living demonstration of evidence-based strategy: measurable, balanced, and grounded in both analytical rigor and pragmatic feasibility.

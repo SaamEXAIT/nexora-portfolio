@@ -1,0 +1,21 @@
+id,name,npv_k,strategic_value,sustainability_tco2,workforce_fte,motivation,duration_years
+1,Software Development / ECOM,7800,9,70,24,8,5
+2,Back-End Technology Choice,-1600,8,25,10,7,3
+3,Hosting Commission,3000,7,35,22,6,4
+4,Upgrade Storage Capacity,1700,6,28,9,6,2
+5,Migrate Existing Services,3800,8,55,20,8,4
+6,Security and Certification,7200,8,60,33,7,6
+7,Social Media Platforms,4300,6,30,14,5,4
+8,Support Module Development,3400,6,25,12,7,3
+9,Services Branding,6000,6,50,20,8,5
+10,Platform Virtualization,1800,7,48,24,6,6
+11,SME Acquisition,8000,8,40,22,7,4
+12,Multi-Language Core Interface,2100,5,38,7,5,2
+13,Mobile Applications,7400,6,52,16,7,6
+14,Develop On-Go Reporting,2000,4,18,5,5,3
+15,Virtual Team Training Materials,1400,1,15,7,9,4
+16,Marketing Campaign,3200,7,45,10,7,3
+17,International Market Expansion,5900,7,78,12,8,6
+18,Consumer Experience Focus,4000,6,58,6,8,2
+19,Multi-Device Access,1400,2,32,5,5,3
+20,Data Protection,7200,3,65,28,6,6

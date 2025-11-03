@@ -1,0 +1,40 @@
+
+/* === Bloomberg-style minimal aesthetic for Nexora Portfolio === */
+
+h1, h2, h3 {
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  color: #0A66C2;              /* Nexora blue tone */
+  font-weight: 600;
+}
+
+.table-striped > tbody > tr:nth-of-type(odd) {
+  background-color: #f8fafc;   /* subtle gray striping for tables */
+}
+
+blockquote {
+  border-left: 4px solid #0A66C2;
+  padding-left: 12px;
+  color: #334155;
+  font-style: italic;
+}
+
+caption {
+  color: #475569;
+  font-size: 0.9em;
+  margin-top: 4px;
+}
+
+p, li {
+  font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  color: #1e293b;
+}
+
+a {
+  color: #0A66C2;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
